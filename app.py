@@ -774,7 +774,7 @@ def bootstrap_db_once():
 bootstrap_db_once()
 cafes = load_cafes_with_stats()
 
-st.markdown("## Kaffis in Basel")
+st.markdown("## Kaffis<3 - Rate your experience")
 
 
 # ----------------------------

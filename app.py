@@ -764,22 +764,34 @@ def enrich_missing_postcodes_with_progress():
 
     status.success("PLZ/Quartier-Anreicherung abgeschlossen.")
 
-def bootstrap_db_once():
-    if st.session_state.get("bootstrapped", False):
-        return
+# ============================
+# DEBUG START
+# ============================
 
-    init_db()
+st.write("STEP 1: Secrets gelesen ✅")
+st.write("STEP 2: Engine bauen…")
 
-    if cafes_count() == 0:
-        st.info("Initialer Basel-Import läuft (OpenStreetMap)…")
-        rows = fetch_osm_cafes_basel_bbox(BASEL_BBOX)
-        upsert_osm_cafes(rows)
-        st.success(f"Import abgeschlossen: {len(rows)} Cafés gefunden.")
+engine = get_engine(DB_URL)
 
-    if missing_postcode_count() > 0:
-        enrich_missing_postcodes_with_progress()
+st.write("STEP 3: Engine gebaut ✅ – teste Verbindung…")
 
-    st.session_state["bootstrapped"] = True
+with engine.connect() as conn:
+    conn.execute(text("SELECT 1"))
+
+st.write("STEP 4: DB OK ✅")
+
+st.write("STEP 5: bootstrap_db_once()…")
+# bootstrap_db_once()   # ← erstmal deaktiviert!
+
+st.write("STEP 6: load_cafes_with_stats()…")
+
+cafes = load_cafes_with_stats()
+
+st.write("STEP 7: cafés geladen ✅", len(cafes))
+
+# ============================
+# DEBUG ENDE
+# ============================
 
 # ============================
 # APP

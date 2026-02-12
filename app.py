@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import sqlite3
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -11,14 +10,41 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 
-# ============================
-# CONFIG
-# ============================
+from sqlalchemy import create_engine, text
+
 st.set_page_config(page_title="Basel Café Karte", layout="wide")
 
-DB_DIR = "data"
-DB_PATH = os.path.join(DB_DIR, "cafes.db")
-os.makedirs(DB_DIR, exist_ok=True)
+# ============================
+# DB URL holen (secrets.toml oder ENV)
+# ============================
+DB_URL = ""
+if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
+    DB_URL = st.secrets["SUPABASE_DB_URL"]
+else:
+    DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+
+if not DB_URL:
+    st.error("❌ Keine DB-URL gefunden. Setze SUPABASE_DB_URL in st.secrets oder als Environment Variable.")
+    st.stop()
+
+@st.cache_resource
+def get_engine():
+    return create_engine(
+        DB_URL,
+        pool_pre_ping=True,
+        connect_args={"sslmode": "require"},
+    )
+
+engine = get_engine()
+
+# Verbindung testen
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    st.success("✅ Verbindung zu Supabase funktioniert!")
+except Exception as e:
+    st.error(f"❌ Verbindung zu Supabase fehlgeschlagen: {e}")
+    st.stop()
 
 # Fixe Basel-BBox (S, W, N, E)
 BASEL_BBOX = (47.52, 7.54, 47.58, 7.62)
@@ -52,7 +78,6 @@ DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 DAY_TO_INDEX = {d: i for i, d in enumerate(DAYS)}
 INDEX_TO_DAY = {i: d for i, d in enumerate(DAYS)}
 
-# Common cases (Builder-compatible) part regex:
 _OPENING_PART_RE = re.compile(
     r"^\s*([A-Za-z]{2}(?:-[A-Za-z]{2})?)\s+(\d{2}:\d{2}-\d{2}:\d{2}(?:,\d{2}:\d{2}-\d{2}:\d{2})*)\s*$"
 )
@@ -76,25 +101,18 @@ st.markdown(
 def _ua_headers():
     return {"User-Agent": "BaselCafeKarte/1.0 (Streamlit)"}
 
-
 def quartier_from_plz(plz: Optional[str]) -> Optional[str]:
     if not plz:
         return None
     return PLZ_TO_QUARTIER.get(str(plz).strip())
 
-
-def extract_plz_from_text(text: Optional[str]) -> Optional[str]:
-    if not text:
+def extract_plz_from_text(text_: Optional[str]) -> Optional[str]:
+    if not text_:
         return None
-    m = PLZ_RE.search(text)
+    m = PLZ_RE.search(text_)
     return m.group(1) if m else None
 
-
 def find_nearest_cafe_id(df: pd.DataFrame, lat: float, lon: float, max_dist_deg: float = 0.002) -> Optional[int]:
-    """
-    Nimmt den nächsten Café-Punkt zu (lat,lon) in einem (sehr) groben Distanzfenster.
-    max_dist_deg ~ 0.002 entspricht grob ~200m (für Basel ok).
-    """
     if df.empty:
         return None
     d = (df["lat"] - lat) ** 2 + (df["lon"] - lon) ** 2
@@ -102,7 +120,6 @@ def find_nearest_cafe_id(df: pd.DataFrame, lat: float, lon: float, max_dist_deg:
     if float(d.loc[idx]) > (max_dist_deg ** 2):
         return None
     return int(df.loc[idx, "id"])
-
 
 def marker_color(overall: Optional[float], rating_count: int) -> str:
     if rating_count == 0 or overall is None:
@@ -113,12 +130,10 @@ def marker_color(overall: Optional[float], rating_count: int) -> str:
         return "orange"
     return "red"
 
-
 # ============================
 # Öffnungszeiten-Filter (Common Cases)
 # ============================
 def _day_matches(day_token: str, day: str) -> bool:
-    # day_token: "Mo" oder "Mo-Fr"
     if "-" in day_token:
         a, b = day_token.split("-")
         if a not in DAY_TO_INDEX or b not in DAY_TO_INDEX:
@@ -128,9 +143,7 @@ def _day_matches(day_token: str, day: str) -> bool:
         return i <= di <= j
     return day_token == day
 
-
 def _time_in_ranges(hhmm: str, ranges: List[Tuple[str, str]]) -> bool:
-    # hhmm: "14:30", ranges: [("08:00","12:00"), ...]
     t_h, t_m = map(int, hhmm.split(":"))
     t = t_h * 60 + t_m
 
@@ -144,18 +157,12 @@ def _time_in_ranges(hhmm: str, ranges: List[Tuple[str, str]]) -> bool:
             if start <= t <= end:
                 return True
         else:
-            # über Mitternacht (z.B. 22:00-02:00)
+            # über Mitternacht
             if t >= start or t <= end:
                 return True
     return False
 
-
 def is_open_at(opening_hours: Optional[str], day: str, hhmm: str) -> bool:
-    """
-    Unterstützt 'common cases' wie sie dein Builder erzeugt:
-    'Mo-Fr 08:00-18:00; Sa 09:00-16:00'
-    Mehrere Slots via Komma, mehrere Segmente via ;
-    """
     if not opening_hours or not opening_hours.strip():
         return False
 
@@ -163,7 +170,7 @@ def is_open_at(opening_hours: Optional[str], day: str, hhmm: str) -> bool:
     for p in parts:
         m = _OPENING_PART_RE.match(p)
         if not m:
-            continue  # unbekanntes Format -> ignorieren
+            continue
         day_part, times_part = m.group(1), m.group(2)
 
         if not _day_matches(day_part, day):
@@ -182,15 +189,11 @@ def is_open_at(opening_hours: Optional[str], day: str, hhmm: str) -> bool:
 
     return False
 
-
 # ============================
 # NOMINATIM SEARCH (Adresse finden)
 # ============================
 @st.cache_data(ttl=300)
 def nominatim_search_basel(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """
-    Liefert Vorschläge in/um Basel (bounding box + CH).
-    """
     q = (query or "").strip()
     if len(q) < 3:
         return []
@@ -220,19 +223,13 @@ def nominatim_search_basel(query: str, limit: int = 8) -> List[Dict[str, Any]]:
         })
     return out
 
-
 # ============================
 # OPENING HOURS: UI -> OSM string
 # ============================
 def _time_to_str(t) -> str:
     return f"{t.hour:02d}:{t.minute:02d}"
 
-
 def build_opening_hours_from_week(week: Dict[str, Dict[str, Any]]) -> str:
-    """
-    week: dict day -> {open: bool, ranges: [(start,end), ...]}
-    Produziert opening_hours String, gruppiert gleiche Zeiten aufeinanderfolgend.
-    """
     day_str = {}
     for d in DAYS:
         info = week.get(d, {})
@@ -257,23 +254,13 @@ def build_opening_hours_from_week(week: Dict[str, Dict[str, Any]]) -> str:
         j = i
         while j + 1 < len(DAYS) and day_str[DAYS[j + 1]] == hrs:
             j += 1
-        if i == j:
-            day_part = DAYS[i]
-        else:
-            day_part = f"{DAYS[i]}-{DAYS[j]}"
+        day_part = DAYS[i] if i == j else f"{DAYS[i]}-{DAYS[j]}"
         groups.append(f"{day_part} {hrs}")
         i = j + 1
 
     return "; ".join(groups)
 
-
 def parse_opening_hours_simple(oh: str) -> Optional[Dict[str, Dict[str, Any]]]:
-    """
-    Sehr vereinfachter Parser für häufige Fälle:
-    'Mo-Fr 08:00-18:00; Sa 09:00-16:00'
-    Unterstützt auch mehrere Zeitfenster via Komma.
-    Falls nicht parsebar -> None
-    """
     if not oh or not oh.strip():
         return None
 
@@ -285,7 +272,6 @@ def parse_opening_hours_simple(oh: str) -> Optional[Dict[str, Dict[str, Any]]]:
             return None
         day_part, times_part = m.group(1), m.group(2)
 
-        # expand days
         if "-" in day_part:
             a, b = day_part.split("-")
             if a not in DAY_TO_INDEX or b not in DAY_TO_INDEX:
@@ -309,15 +295,13 @@ def parse_opening_hours_simple(oh: str) -> Optional[Dict[str, Dict[str, Any]]]:
 
         for d in day_list:
             week[d]["open"] = True
-            week[d]["ranges"] = ranges[:]  # copy
+            week[d]["ranges"] = ranges[:]
 
     return week
-
 
 def _str_to_time(hhmm: str):
     hh, mm = hhmm.split(":")
     return datetime(2000, 1, 1, int(hh), int(mm)).time()
-
 
 def week_from_parsed(parsed_week: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     week = {d: {"open": False, "ranges": []} for d in DAYS}
@@ -332,12 +316,7 @@ def week_from_parsed(parsed_week: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[s
         week[d]["ranges"] = rr
     return week
 
-
 def opening_hours_editor(key_prefix: str, initial_oh: Optional[str]) -> str:
-    """
-    UI Editor: returns opening_hours string
-    - versucht initial_oh zu parsen, sonst default leer
-    """
     parsed = parse_opening_hours_simple(initial_oh or "")
     if parsed is not None:
         week = week_from_parsed(parsed)
@@ -395,141 +374,91 @@ def opening_hours_editor(key_prefix: str, initial_oh: Optional[str]) -> str:
         return (raw.strip() or "")
     return (built or "")
 
-
 # ============================
-# DB
+# DB (Supabase/Postgres)
 # ============================
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-
-def add_column_if_missing(conn, table: str, column: str, coltype: str):
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table});")
-    cols = {row[1] for row in cur.fetchall()}
-    if column not in cols:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
-
-
 def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
+    ddl = """
+    CREATE TABLE IF NOT EXISTS cafes (
+        id BIGSERIAL PRIMARY KEY,
+        source TEXT NOT NULL,
+        osm_id TEXT UNIQUE,
+        name TEXT NOT NULL,
+        lat DOUBLE PRECISION NOT NULL,
+        lon DOUBLE PRECISION NOT NULL,
+        address TEXT,
+        postcode TEXT,
+        quartier TEXT,
+        opening_hours TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS cafes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            osm_id TEXT,
-            name TEXT NOT NULL,
-            lat REAL NOT NULL,
-            lon REAL NOT NULL,
-            address TEXT,
-            postcode TEXT,
-            quartier TEXT,
-            opening_hours TEXT,
-            created_at TEXT NOT NULL
-        );
-        """)
+    CREATE TABLE IF NOT EXISTS ratings (
+        id BIGSERIAL PRIMARY KEY,
+        cafe_id BIGINT NOT NULL REFERENCES cafes(id) ON DELETE CASCADE,
+        reviewer_name TEXT,
+        coffee_quality INT NOT NULL CHECK (coffee_quality BETWEEN 1 AND 5),
+        ambience INT NOT NULL CHECK (ambience BETWEEN 1 AND 5),
+        service INT NOT NULL CHECK (service BETWEEN 1 AND 5),
+        value_for_money INT NOT NULL CHECK (value_for_money BETWEEN 1 AND 5),
+        food INT NOT NULL CHECK (food BETWEEN 1 AND 5),
+        comment TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 
-        cur.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_cafes_osm_unique
-        ON cafes(osm_id) WHERE osm_id IS NOT NULL;
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS ratings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cafe_id INTEGER NOT NULL,
-            reviewer_name TEXT,
-            coffee_quality INTEGER NOT NULL CHECK(coffee_quality BETWEEN 1 AND 5),
-            ambience INTEGER NOT NULL CHECK(ambience BETWEEN 1 AND 5),
-            service INTEGER NOT NULL CHECK(service BETWEEN 1 AND 5),
-            value_for_money INTEGER NOT NULL CHECK(value_for_money BETWEEN 1 AND 5),
-            food INTEGER NOT NULL CHECK(food BETWEEN 1 AND 5),
-            comment TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(cafe_id) REFERENCES cafes(id)
-        );
-        """)
-
-        add_column_if_missing(conn, "cafes", "address", "TEXT")
-        add_column_if_missing(conn, "cafes", "postcode", "TEXT")
-        add_column_if_missing(conn, "cafes", "quartier", "TEXT")
-        add_column_if_missing(conn, "cafes", "opening_hours", "TEXT")
-        add_column_if_missing(conn, "ratings", "reviewer_name", "TEXT")
-
-        conn.commit()
-
+    CREATE INDEX IF NOT EXISTS idx_ratings_cafe_id ON ratings(cafe_id);
+    CREATE INDEX IF NOT EXISTS idx_cafes_quartier ON cafes(quartier);
+    """
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
 
 def cafes_count() -> int:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM cafes;")
-        return int(cur.fetchone()[0])
-
+    with engine.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM cafes")).scalar() or 0)
 
 def missing_postcode_count() -> int:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM cafes WHERE postcode IS NULL OR TRIM(postcode) = ''")
-        return int(cur.fetchone()[0])
-
+    with engine.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM cafes WHERE postcode IS NULL OR BTRIM(postcode) = ''")).scalar() or 0)
 
 def upsert_osm_cafes(rows: List[Dict[str, Any]]):
-    now = datetime.utcnow().isoformat()
-    with get_conn() as conn:
-        cur = conn.cursor()
+    sql = """
+    INSERT INTO cafes (source, osm_id, name, lat, lon, address, postcode, quartier, opening_hours, created_at)
+    VALUES (:source, :osm_id, :name, :lat, :lon, :address, :postcode, :quartier, :opening_hours, NOW())
+    ON CONFLICT (osm_id) DO UPDATE SET
+        name = CASE WHEN cafes.name IS NULL OR cafes.name = '' THEN EXCLUDED.name ELSE cafes.name END,
+        address = COALESCE(cafes.address, EXCLUDED.address),
+        postcode = COALESCE(cafes.postcode, EXCLUDED.postcode),
+        quartier = COALESCE(cafes.quartier, EXCLUDED.quartier),
+        opening_hours = COALESCE(cafes.opening_hours, EXCLUDED.opening_hours);
+    """
+    with engine.begin() as conn:
         for r in rows:
-            cur.execute("""
-                INSERT OR IGNORE INTO cafes
-                (source, osm_id, name, lat, lon, address, postcode, quartier, opening_hours, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                "osm",
-                r.get("osm_id"),
-                r.get("name") or "Unbekannt",
-                float(r["lat"]),
-                float(r["lon"]),
-                r.get("address"),
-                r.get("postcode"),
-                r.get("quartier"),
-                r.get("opening_hours"),
-                now
-            ))
-
-            cur.execute("""
-                UPDATE cafes
-                SET
-                    name = COALESCE(NULLIF(name, ''), ?),
-                    address = COALESCE(address, ?),
-                    postcode = COALESCE(postcode, ?),
-                    quartier = COALESCE(quartier, ?),
-                    opening_hours = COALESCE(opening_hours, ?)
-                WHERE osm_id = ?
-            """, (
-                r.get("name"),
-                r.get("address"),
-                r.get("postcode"),
-                r.get("quartier"),
-                r.get("opening_hours"),
-                r.get("osm_id"),
-            ))
-
-        conn.commit()
-
+            conn.execute(
+                text(sql),
+                {
+                    "source": "osm",
+                    "osm_id": r.get("osm_id"),
+                    "name": r.get("name") or "Unbekannt",
+                    "lat": float(r["lat"]),
+                    "lon": float(r["lon"]),
+                    "address": r.get("address"),
+                    "postcode": r.get("postcode"),
+                    "quartier": r.get("quartier"),
+                    "opening_hours": r.get("opening_hours"),
+                },
+            )
 
 def update_cafe_location_fields(cafe_id: int, address: Optional[str], postcode: Optional[str], quartier: Optional[str]):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE cafes
-            SET address = COALESCE(address, ?),
-                postcode = COALESCE(postcode, ?),
-                quartier = COALESCE(quartier, ?)
-            WHERE id = ?
-        """, (address, postcode, quartier, cafe_id))
-        conn.commit()
-
+    sql = """
+    UPDATE cafes
+    SET
+        address = COALESCE(address, :address),
+        postcode = COALESCE(postcode, :postcode),
+        quartier = COALESCE(quartier, :quartier)
+    WHERE id = :id
+    """
+    with engine.begin() as conn:
+        conn.execute(text(sql), {"id": int(cafe_id), "address": address, "postcode": postcode, "quartier": quartier})
 
 def update_cafe(
     cafe_id: int,
@@ -541,21 +470,32 @@ def update_cafe(
     quartier: Optional[str],
     opening_hours: Optional[str],
 ):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE cafes
-            SET name = ?,
-                lat = ?,
-                lon = ?,
-                address = ?,
-                postcode = ?,
-                quartier = ?,
-                opening_hours = ?
-            WHERE id = ?
-        """, (name, lat, lon, address, postcode, quartier, opening_hours, cafe_id))
-        conn.commit()
-
+    sql = """
+    UPDATE cafes
+    SET
+        name = :name,
+        lat = :lat,
+        lon = :lon,
+        address = :address,
+        postcode = :postcode,
+        quartier = :quartier,
+        opening_hours = :opening_hours
+    WHERE id = :id
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(sql),
+            {
+                "id": int(cafe_id),
+                "name": name,
+                "lat": float(lat),
+                "lon": float(lon),
+                "address": address,
+                "postcode": postcode,
+                "quartier": quartier,
+                "opening_hours": opening_hours,
+            },
+        )
 
 def insert_user_cafe(
     name: str,
@@ -566,16 +506,23 @@ def insert_user_cafe(
     postcode: Optional[str],
     quartier: Optional[str],
 ):
-    now = datetime.utcnow().isoformat()
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO cafes
-            (source, osm_id, name, lat, lon, address, postcode, quartier, opening_hours, created_at)
-            VALUES ('user', NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, lat, lon, address, postcode, quartier, opening_hours, now))
-        conn.commit()
-
+    sql = """
+    INSERT INTO cafes (source, osm_id, name, lat, lon, address, postcode, quartier, opening_hours, created_at)
+    VALUES ('user', NULL, :name, :lat, :lon, :address, :postcode, :quartier, :opening_hours, NOW())
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(sql),
+            {
+                "name": name,
+                "lat": float(lat),
+                "lon": float(lon),
+                "address": address,
+                "postcode": postcode,
+                "quartier": quartier,
+                "opening_hours": opening_hours,
+            },
+        )
 
 def insert_rating_multi(
     cafe_id: int,
@@ -587,88 +534,82 @@ def insert_rating_multi(
     food: int,
     comment: Optional[str]
 ):
-    now = datetime.utcnow().isoformat()
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO ratings
-            (cafe_id, reviewer_name, coffee_quality, ambience, service, value_for_money, food, comment, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (cafe_id, reviewer_name, coffee_quality, ambience, service, value_for_money, food, comment, now))
-        conn.commit()
-
+    sql = """
+    INSERT INTO ratings
+      (cafe_id, reviewer_name, coffee_quality, ambience, service, value_for_money, food, comment, created_at)
+    VALUES
+      (:cafe_id, :reviewer_name, :coffee_quality, :ambience, :service, :value_for_money, :food, :comment, NOW())
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(sql),
+            {
+                "cafe_id": int(cafe_id),
+                "reviewer_name": reviewer_name,
+                "coffee_quality": int(coffee_quality),
+                "ambience": int(ambience),
+                "service": int(service),
+                "value_for_money": int(value_for_money),
+                "food": int(food),
+                "comment": comment,
+            },
+        )
 
 def load_cafes_with_stats() -> pd.DataFrame:
-    with get_conn() as conn:
-        df = pd.read_sql_query("""
-            SELECT
-                c.*,
-                AVG((r.coffee_quality + r.ambience + r.service + r.value_for_money + r.food) / 5.0) AS overall,
-                COUNT(r.id) AS rating_count
-            FROM cafes c
-            LEFT JOIN ratings r ON r.cafe_id = c.id
-            GROUP BY c.id
-        """, conn)
-    return df
-
+    sql = """
+    SELECT
+        c.*,
+        AVG((r.coffee_quality + r.ambience + r.service + r.value_for_money + r.food) / 5.0) AS overall,
+        COUNT(r.id) AS rating_count
+    FROM cafes c
+    LEFT JOIN ratings r ON r.cafe_id = c.id
+    GROUP BY c.id
+    """
+    return pd.read_sql(sql, engine)
 
 def load_cafes_missing_postcode(limit: int = 5000) -> List[Dict[str, Any]]:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, lat, lon
-            FROM cafes
-            WHERE postcode IS NULL OR TRIM(postcode) = ''
-            LIMIT ?
-        """, (limit,))
-        rows = cur.fetchall()
-    return [{"id": r[0], "lat": float(r[1]), "lon": float(r[2])} for r in rows]
-
+    sql = """
+    SELECT id, lat, lon
+    FROM cafes
+    WHERE postcode IS NULL OR BTRIM(postcode) = ''
+    LIMIT :limit
+    """
+    df = pd.read_sql(text(sql), engine, params={"limit": int(limit)})
+    return [{"id": int(r["id"]), "lat": float(r["lat"]), "lon": float(r["lon"])} for _, r in df.iterrows()]
 
 def load_rating_averages_for_cafe(cafe_id: int) -> Dict[str, Optional[float]]:
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                AVG(coffee_quality) AS avg_coffee_quality,
-                AVG(ambience) AS avg_ambience,
-                AVG(service) AS avg_service,
-                AVG(value_for_money) AS avg_value_for_money,
-                AVG(food) AS avg_food,
-                AVG((coffee_quality + ambience + service + value_for_money + food) / 5.0) AS avg_overall,
-                COUNT(*) AS n
-            FROM ratings
-            WHERE cafe_id = ?
-            """,
-            conn,
-            params=(cafe_id,),
-        )
+    sql = """
+    SELECT
+        AVG(coffee_quality) AS avg_coffee_quality,
+        AVG(ambience) AS avg_ambience,
+        AVG(service) AS avg_service,
+        AVG(value_for_money) AS avg_value_for_money,
+        AVG(food) AS avg_food,
+        AVG((coffee_quality + ambience + service + value_for_money + food) / 5.0) AS avg_overall,
+        COUNT(*) AS n
+    FROM ratings
+    WHERE cafe_id = :cafe_id
+    """
+    df = pd.read_sql(text(sql), engine, params={"cafe_id": int(cafe_id)})
     return df.iloc[0].to_dict()
 
-
 def load_ratings_for_cafe(cafe_id: int) -> pd.DataFrame:
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            """
-            SELECT
-                created_at,
-                reviewer_name,
-                coffee_quality,
-                ambience,
-                service,
-                value_for_money,
-                food,
-                ROUND((coffee_quality + ambience + service + value_for_money + food) / 5.0, 1) AS overall,
-                comment
-            FROM ratings
-            WHERE cafe_id = ?
-            ORDER BY datetime(created_at) DESC
-            """,
-            conn,
-            params=(cafe_id,),
-        )
-    return df
-
+    sql = """
+    SELECT
+        created_at,
+        reviewer_name,
+        coffee_quality,
+        ambience,
+        service,
+        value_for_money,
+        food,
+        ROUND((coffee_quality + ambience + service + value_for_money + food) / 5.0, 1) AS overall,
+        comment
+    FROM ratings
+    WHERE cafe_id = :cafe_id
+    ORDER BY created_at DESC
+    """
+    return pd.read_sql(text(sql), engine, params={"cafe_id": int(cafe_id)})
 
 # ============================
 # OSM IMPORT
@@ -756,7 +697,6 @@ def fetch_osm_cafes_basel_bbox(bbox: Tuple[float, float, float, float]) -> List[
 
     raise RuntimeError(f"Overpass nicht erreichbar (mehrere Server probiert). Letzter Fehler: {last_error}")
 
-
 # ============================
 # Reverse Geocoding (Nominatim)
 # ============================
@@ -780,7 +720,6 @@ def nominatim_reverse(lat: float, lon: float, session: requests.Session) -> Tupl
         postcode = extract_plz_from_text(display)
 
     return display, postcode
-
 
 def enrich_missing_postcodes_with_progress():
     missing = load_cafes_missing_postcode(limit=5000)
@@ -812,7 +751,6 @@ def enrich_missing_postcodes_with_progress():
 
     status.success("PLZ/Quartier-Anreicherung abgeschlossen.")
 
-
 def bootstrap_db_once():
     if st.session_state.get("bootstrapped", False):
         return
@@ -830,7 +768,6 @@ def bootstrap_db_once():
 
     st.session_state["bootstrapped"] = True
 
-
 # ============================
 # APP
 # ============================
@@ -838,7 +775,7 @@ bootstrap_db_once()
 cafes = load_cafes_with_stats()
 
 st.markdown("## 👁️ Basel Café Karte")
-st.caption("Cafés (OSM) sind automatisch importiert. Bewertungen & Filter sind lokal in SQLite gespeichert.")
+st.caption("Cafés (OSM) sind automatisch importiert. Bewertungen & Filter sind in Supabase (Postgres) gespeichert.")
 
 # ----------------------------
 # Filter: Popover oben links
@@ -871,21 +808,15 @@ if only_with_hours:
 if hours_contains.strip():
     filtered = filtered[filtered["opening_hours"].fillna("").str.contains(hours_contains.strip(), case=False, na=False)]
 
-# Öffnungszeiten: jetzt offen
 if open_now:
     now = datetime.now()
-    day = DAYS[now.weekday()]  # Mo..Su
+    day = DAYS[now.weekday()]
     hhmm = f"{now.hour:02d}:{now.minute:02d}"
-    filtered = filtered[
-        filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))
-    ]
+    filtered = filtered[filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))]
 
-# Öffnungszeiten: custom Tag/Uhrzeit
 if custom_time_filter:
     hhmm = f"{filter_time.hour:02d}:{filter_time.minute:02d}"
-    filtered = filtered[
-        filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))
-    ]
+    filtered = filtered[filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))]
 
 # ----------------------------
 # Layout: Karte groß + Controls rechts
@@ -905,7 +836,7 @@ with map_col:
         color = marker_color(row["overall"], int(row["rating_count"]))
         icon = folium.Icon(color=color, icon="coffee", prefix="fa")
 
-        rating_txt = "-" if row["overall"] is None else f"{float(row['overall']):.1f} ⭐"
+        rating_txt = "-" if pd.isna(row["overall"]) else f"{float(row['overall']):.1f} ⭐"
         popup_html = f"""
         <b>{row['name']}</b><br>
         Adresse: {row['address'] or '-'}<br>
@@ -923,7 +854,6 @@ with map_col:
     st.caption("Klick auf Marker (oder in die Nähe) → Café auswählen. Klick auf Karte → Koordinaten übernehmen.")
     map_state = st_folium(m, width=None, height=720)
 
-    # Auswahl per Klick (Marker oder Karte)
     clicked_obj = None
     if map_state:
         clicked_obj = map_state.get("last_object_clicked") or map_state.get("last_clicked")
@@ -935,8 +865,16 @@ with map_col:
         if selected_id is not None:
             st.session_state["selected_cafe_id"] = int(selected_id)
 
-    # Koordinaten für "Neues Café"
     clicked = map_state.get("last_clicked") if map_state else None
+
+# ============================
+# AUTO: Wenn Café selektiert -> Bearbeiten
+# ============================
+if "manage_mode" not in st.session_state:
+    st.session_state["manage_mode"] = "Neu erstellen"
+
+if st.session_state.get("selected_cafe_id") is not None:
+    st.session_state["manage_mode"] = "Bearbeiten"
 
 with ui_col:
     st.markdown("### 🧰 Aktionen")
@@ -954,24 +892,34 @@ with ui_col:
             axis=1
         )
 
-        manage_mode = st.selectbox("Modus", ["Neu erstellen", "Bearbeiten"], index=0)
+        # Modus mit key (wichtig!)
+        manage_mode = st.selectbox("Modus", ["Neu erstellen", "Bearbeiten"], key="manage_mode")
 
         edit_id = None
         if manage_mode == "Bearbeiten" and not cafes_for_select.empty:
             sel_id = st.session_state.get("selected_cafe_id")
+
             options = cafes_for_select.sort_values("name")[["id", "label"]].to_records(index=False)
             id_to_label = {int(i): str(l) for i, l in options}
             all_labels = list(id_to_label.values())
+
             default_label = id_to_label.get(int(sel_id)) if sel_id else (all_labels[0] if all_labels else "")
-            chosen = st.selectbox("Café wählen", all_labels, index=all_labels.index(default_label) if default_label in all_labels else 0)
+            # selectbox default sauber setzen (wenn Karte was anderes gewählt hat)
+            if "manage_cafe_label" not in st.session_state or st.session_state["manage_cafe_label"] != default_label:
+                st.session_state["manage_cafe_label"] = default_label
+
+            chosen = st.selectbox("Café wählen", all_labels, key="manage_cafe_label")
             edit_id = [k for k, v in id_to_label.items() if v == chosen][0]
             st.session_state["selected_cafe_id"] = int(edit_id)
 
-        # Initial values
+        # Prefix pro Café (damit Widgets beim Wechsel neu initialisieren)
+        form_prefix = f"manage_edit_{edit_id}" if (manage_mode == "Bearbeiten" and edit_id is not None) else "manage_new"
+
+        # Initialwerte abhängig von Modus
         if manage_mode == "Bearbeiten" and edit_id is not None:
             row = cafes[cafes["id"] == int(edit_id)].iloc[0]
             init_name = str(row["name"])
-            init_address = None if pd.isna(row["address"]) else str(row["address"])
+            init_address = "" if pd.isna(row["address"]) else str(row["address"])
             init_lat = float(row["lat"])
             init_lon = float(row["lon"])
             init_postcode = None if pd.isna(row["postcode"]) else str(row["postcode"])
@@ -986,8 +934,11 @@ with ui_col:
             init_quartier = None
             init_oh = ""
 
+        # ----------------------------
+        # Adresse suchen
+        # ----------------------------
         st.markdown("#### Adresse suchen (Nominatim)")
-        addr_q = st.text_input("Suche", value="", placeholder="z.B. Steinentorstrasse 13")
+        addr_q = st.text_input("Suche", value="", placeholder="z.B. Steinentorstrasse 13", key=f"{form_prefix}_addr_search")
 
         suggestions = []
         if addr_q.strip() and len(addr_q.strip()) >= 3:
@@ -996,37 +947,56 @@ with ui_col:
             except Exception as e:
                 st.error(f"Nominatim Suche fehlgeschlagen: {e}")
 
-        chosen_addr = None
         if suggestions:
             labels = [s["label"] for s in suggestions]
-            chosen_label = st.selectbox("Vorschläge", labels, index=0)
+            chosen_label = st.selectbox("Vorschläge", labels, index=0, key=f"{form_prefix}_addr_suggestions")
             chosen_addr = next((s for s in suggestions if s["label"] == chosen_label), None)
-            if st.button("Adresse übernehmen"):
-                st.session_state["manage_address"] = chosen_addr["label"]
-                st.session_state["manage_lat"] = float(chosen_addr["lat"])
-                st.session_state["manage_lon"] = float(chosen_addr["lon"])
-                st.session_state["manage_postcode"] = chosen_addr.get("postcode")
-                st.session_state["manage_quartier"] = quartier_from_plz(chosen_addr.get("postcode"))
 
-        name = st.text_input("Name", value=st.session_state.get("manage_name", init_name))
-        address = st.text_input("Adresse", value=st.session_state.get("manage_address", init_address))
-        lat = st.number_input("Latitude", value=float(st.session_state.get("manage_lat", init_lat)), format="%.6f")
-        lon = st.number_input("Longitude", value=float(st.session_state.get("manage_lon", init_lon)), format="%.6f")
+            if st.button("Adresse übernehmen", key=f"{form_prefix}_addr_apply"):
+                st.session_state[f"{form_prefix}_address"] = chosen_addr["label"]
+                st.session_state[f"{form_prefix}_lat"] = float(chosen_addr["lat"])
+                st.session_state[f"{form_prefix}_lon"] = float(chosen_addr["lon"])
+                st.session_state[f"{form_prefix}_postcode_override"] = chosen_addr.get("postcode")
+                st.session_state[f"{form_prefix}_quartier_override"] = quartier_from_plz(chosen_addr.get("postcode"))
+                st.rerun()
 
-        postcode = st.session_state.get("manage_postcode", init_postcode) or extract_plz_from_text(address)
-        quartier = st.session_state.get("manage_quartier", init_quartier) or quartier_from_plz(postcode)
+        # ----------------------------
+        # Formularfelder (mit keys!)
+        # ----------------------------
+        name = st.text_input("Name", value=init_name, key=f"{form_prefix}_name")
+        address = st.text_input("Adresse", value=init_address, key=f"{form_prefix}_address")
+        lat = st.number_input("Latitude", value=float(init_lat), format="%.6f", key=f"{form_prefix}_lat")
+        lon = st.number_input("Longitude", value=float(init_lon), format="%.6f", key=f"{form_prefix}_lon")
+
+        postcode = (
+            st.session_state.get(f"{form_prefix}_postcode_override")
+            or init_postcode
+            or extract_plz_from_text(address)
+        )
+        quartier = (
+            st.session_state.get(f"{form_prefix}_quartier_override")
+            or init_quartier
+            or quartier_from_plz(postcode)
+        )
 
         st.write(f"**PLZ:** {postcode or '-'}")
         st.write(f"**Quartier:** {quartier or '-'}")
 
+        # ----------------------------
+        # Öffnungszeiten (WICHTIG: prefix abhängig von Café-ID!)
+        # ----------------------------
         st.markdown("#### Öffnungszeiten")
+        oh_prefix = f"{form_prefix}_oh"
         opening_hours = opening_hours_editor(
-            key_prefix="manage_oh",
+            key_prefix=oh_prefix,
             initial_oh=init_oh if manage_mode == "Bearbeiten" else ""
         )
 
+        # ----------------------------
+        # Save
+        # ----------------------------
         if manage_mode == "Bearbeiten" and edit_id is not None:
-            if st.button("Änderungen speichern"):
+            if st.button("Änderungen speichern", key=f"{form_prefix}_save_edit"):
                 if not name.strip():
                     st.error("Bitte Name eingeben.")
                 else:
@@ -1043,11 +1013,9 @@ with ui_col:
                         opening_hours=opening_hours.strip() or None,
                     )
                     st.success("Café aktualisiert.")
-                    for k in ["manage_name", "manage_address", "manage_lat", "manage_lon", "manage_postcode", "manage_quartier"]:
-                        st.session_state.pop(k, None)
                     st.rerun()
         else:
-            if st.button("Neues Café speichern"):
+            if st.button("Neues Café speichern", key=f"{form_prefix}_save_new"):
                 if not name.strip():
                     st.error("Bitte Name eingeben.")
                 else:
@@ -1063,8 +1031,6 @@ with ui_col:
                         quartier=quartier2,
                     )
                     st.success("Café gespeichert.")
-                    for k in ["manage_name", "manage_address", "manage_lat", "manage_lon", "manage_postcode", "manage_quartier"]:
-                        st.session_state.pop(k, None)
                     st.rerun()
 
     # ----------------------------
@@ -1079,7 +1045,7 @@ with ui_col:
             axis=1
         )
 
-        search = st.text_input("Suche nach Name", value="")
+        search = st.text_input("Suche nach Name", value="", key="rate_search")
         if search.strip():
             cafes_for_select = cafes_for_select[
                 cafes_for_select["name"].str.contains(search.strip(), case=False, na=False)
@@ -1095,12 +1061,10 @@ with ui_col:
             labels = list(id_to_label.values())
 
             default_label = id_to_label.get(int(selected_cafe_id)) if selected_cafe_id else labels[0]
-            chosen_label = st.selectbox(
-                "Café auswählen",
-                labels,
-                index=labels.index(default_label) if default_label in labels else 0
-            )
+            if "rate_cafe_label" not in st.session_state or st.session_state["rate_cafe_label"] != default_label:
+                st.session_state["rate_cafe_label"] = default_label
 
+            chosen_label = st.selectbox("Café auswählen", labels, key="rate_cafe_label")
             chosen_id = [k for k, v in id_to_label.items() if v == chosen_label][0]
             st.session_state["selected_cafe_id"] = int(chosen_id)
 
@@ -1133,21 +1097,39 @@ with ui_col:
                 ratings_df = load_ratings_for_cafe(int(selected_cafe_id))
                 if not ratings_df.empty:
                     st.markdown("#### Bewertungen (neueste zuerst)")
-                    st.dataframe(
-                        ratings_df.rename(columns={
-                            "created_at": "Datum",
-                            "reviewer_name": "Name",
-                            "coffee_quality": "Kaffee & Getränke",
-                            "ambience": "Ambiente",
-                            "service": "Service",
-                            "value_for_money": "Preis/Leistung",
-                            "food": "Speisen",
-                            "overall": "Overall",
-                            "comment": "Kommentar",
-                        }),
-                        use_container_width=True,
-                        hide_index=True
-                    )
+
+                    df_show = ratings_df.rename(columns={
+                        "reviewer_name": "Name",
+                        "coffee_quality": "Kaffee & Getränke",
+                        "ambience": "Ambiente",
+                        "service": "Service",
+                        "value_for_money": "Preis/Leistung",
+                        "food": "Speisen",
+                        "overall": "Overall",
+                        "comment": "Kommentar",
+                        "created_at": "Datum"
+                    })
+
+                    # gewünschte Reihenfolge: Overall zuerst, Datum zuletzt
+                    col_order = [
+                        "Name",
+                        "Overall",
+                        "Kaffee & Getränke",
+                        "Ambiente",
+                        "Service",
+                        "Preis/Leistung",
+                        "Speisen",
+                        "Kommentar",
+                        "Datum",
+                    ]
+
+                    # (robust, falls mal eine Spalte fehlt)
+                    col_order = [c for c in col_order if c in df_show.columns]
+                    rest = [c for c in df_show.columns if c not in col_order]
+                    df_show = df_show[col_order + rest]
+
+                    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
 
             st.divider()
             st.markdown("#### Neue Bewertung")
@@ -1204,19 +1186,15 @@ if open_now:
     now = datetime.now()
     day = DAYS[now.weekday()]
     hhmm = f"{now.hour:02d}:{now.minute:02d}"
-    filtered_tbl = filtered_tbl[
-        filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))
-    ]
+    filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))]
 
 if custom_time_filter:
     hhmm = f"{filter_time.hour:02d}:{filter_time.minute:02d}"
-    filtered_tbl = filtered_tbl[
-        filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))
-    ]
+    filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))]
 
 st.dataframe(
     filtered_tbl.sort_values(["overall", "rating_count"], ascending=False)[
-        ["id", "name", "address", "opening_hours", "overall", "rating_count", "source", "postcode", "quartier"]
+        ["name", "overall", "address", "opening_hours", "rating_count", "quartier"]
     ],
     use_container_width=True,
     hide_index=True

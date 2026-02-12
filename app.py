@@ -12,7 +12,7 @@ from streamlit_folium import st_folium
 
 from sqlalchemy import create_engine, text
 
-st.set_page_config(page_title="Basel Café Karte", layout="wide")
+st.set_page_config(page_title="Kaffis in Basel", layout="wide")
 
 # ============================
 # DB URL holen (secrets.toml oder ENV)

@@ -764,8 +764,15 @@ def enrich_missing_postcodes_with_progress():
 
     status.success("PLZ/Quartier-Anreicherung abgeschlossen.")
 
+    def bootstrap_db_once():
+        if st.session_state.get("bootstrapped", False):
+            return
+
 # ============================
-# DEBUG START
+# APP
+# ============================
+# ============================
+# APP (DEBUG MODE)
 # ============================
 
 st.write("STEP 1: Secrets gelesen ✅")
@@ -774,30 +781,17 @@ st.write("STEP 2: Engine bauen…")
 engine = get_engine(DB_URL)
 
 st.write("STEP 3: Engine gebaut ✅ – teste Verbindung…")
-
 with engine.connect() as conn:
     conn.execute(text("SELECT 1"))
 
 st.write("STEP 4: DB OK ✅")
 
-st.write("STEP 5: bootstrap_db_once()…")
-# bootstrap_db_once()   # ← erstmal deaktiviert!
-
 st.write("STEP 6: load_cafes_with_stats()…")
-
 cafes = load_cafes_with_stats()
-
 st.write("STEP 7: cafés geladen ✅", len(cafes))
 
-# ============================
-# DEBUG ENDE
-# ============================
+st.stop()  # <- HIER STOPPEN, damit garantiert nichts anderes mehr läuft
 
-# ============================
-# APP
-# ============================
-bootstrap_db_once()
-cafes = load_cafes_with_stats()
 
 st.markdown("## Kaffis<3 - Rate your experience")
 

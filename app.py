@@ -39,12 +39,18 @@ engine = get_engine()
 
 # Verbindung testen
 try:
+    engine = get_engine()
+    st.write("DB engine erstellt")
+
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    st.success("✅ Verbindung zu Supabase funktioniert!")
+
+    st.success("✅ DB Verbindung OK")
+
 except Exception as e:
-    st.error(f"❌ Verbindung zu Supabase fehlgeschlagen: {e}")
-    st.stop()
+    st.error("❌ DB Fehler:")
+    st.exception(e)
+
 
 # Fixe Basel-BBox (S, W, N, E)
 BASEL_BBOX = (47.52, 7.54, 47.58, 7.62)

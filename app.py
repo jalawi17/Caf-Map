@@ -978,6 +978,8 @@ with ui_col:
 
         name = st.text_input("Name", value=init_name, key=f"{form_prefix}_name")
         address = st.text_input("Adresse", value=init_address, key=f"{form_prefix}_address")
+        lat = st.number_input("Latitude", value=float(init_lat), format="%.6f", key=f"{form_prefix}_lat")
+        lon = st.number_input("Longitude", value=float(init_lon), format="%.6f", key=f"{form_prefix}_lon")
 
         postcode = (
             st.session_state.get(f"{form_prefix}_postcode_override")

@@ -15,42 +15,49 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="Kaffis<3", layout="wide")
 
 # ============================
-# DB URL holen (secrets.toml oder ENV)
+# DB URL holen (Secrets oder ENV) – robust
 # ============================
-DB_URL = ""
-if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
-    DB_URL = st.secrets["SUPABASE_DB_URL"]
-else:
-    DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+
+# Streamlit Secrets (Cloud oder lokale secrets.toml) optional verwenden
+try:
+    DB_URL = st.secrets.get("SUPABASE_DB_URL", DB_URL)
+except Exception:
+    pass
 
 if not DB_URL:
-    st.error("❌ Keine DB-URL gefunden. Setze SUPABASE_DB_URL in st.secrets oder als Environment Variable.")
+    st.error("❌ Keine DB-URL gefunden. Setze SUPABASE_DB_URL in Streamlit Secrets (Cloud) oder als Environment Variable / lokale .streamlit/secrets.toml.")
     st.stop()
 
+# ============================
+# Engine (mit Timeouts, Cache an DB_URL gebunden)
+# ============================
 @st.cache_resource
-def get_engine():
+def get_engine(db_url: str):
     return create_engine(
-        DB_URL,
+        db_url,
         pool_pre_ping=True,
-        connect_args={"sslmode": "require"},
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 10,   # verhindert ewiges Hängen beim Connect
+        },
+        pool_timeout=10,            # verhindert ewiges Warten auf Pool
     )
 
-engine = get_engine()
+engine = get_engine(DB_URL)
 
-# Verbindung testen
+# ============================
+# Verbindung testen (sauberer Output statt "hängen")
+# ============================
 try:
-    engine = get_engine()
-    st.write("DB engine erstellt")
-
+    st.write("DB engine erstellt – teste Verbindung…")
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-
     st.success("✅ DB Verbindung OK")
-
 except Exception as e:
     st.error("❌ DB Fehler:")
     st.exception(e)
-
+    st.stop()
 
 # Fixe Basel-BBox (S, W, N, E)
 BASEL_BBOX = (47.52, 7.54, 47.58, 7.62)

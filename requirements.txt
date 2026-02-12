@@ -1,5 +1,7 @@
 streamlit
-streamlit-folium
-folium
 pandas
 requests
+folium
+streamlit-folium
+sqlalchemy
+psycopg2-binary

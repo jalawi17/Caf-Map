@@ -9,9 +9,11 @@ import requests
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-
 from sqlalchemy import create_engine, text
 
+# ============================
+# PAGE CONFIG
+# ============================
 st.set_page_config(page_title="Kaffis<3", layout="wide")
 
 # ============================
@@ -19,14 +21,17 @@ st.set_page_config(page_title="Kaffis<3", layout="wide")
 # ============================
 DB_URL = os.environ.get("SUPABASE_DB_URL", "")
 
-# Streamlit Secrets (Cloud oder lokale secrets.toml) optional verwenden
 try:
+    # Streamlit Cloud Secrets oder lokale .streamlit/secrets.toml
     DB_URL = st.secrets.get("SUPABASE_DB_URL", DB_URL)
 except Exception:
     pass
 
 if not DB_URL:
-    st.error("❌ Keine DB-URL gefunden. Setze SUPABASE_DB_URL in Streamlit Secrets (Cloud) oder als Environment Variable / lokale .streamlit/secrets.toml.")
+    st.error(
+        "❌ Keine DB-URL gefunden.\n\n"
+        "Setze `SUPABASE_DB_URL` in Streamlit Cloud Secrets oder lokal als ENV / .streamlit/secrets.toml."
+    )
     st.stop()
 
 # ============================
@@ -47,19 +52,8 @@ def get_engine(db_url: str):
 engine = get_engine(DB_URL)
 
 # ============================
-# Verbindung testen (sauberer Output statt "hängen")
-# ============================
-try:
-    st.write("DB engine erstellt – teste Verbindung…")
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    st.success("✅ DB Verbindung OK")
-except Exception as e:
-    st.error("❌ DB Fehler:")
-    st.exception(e)
-    st.stop()
-
 # Fixe Basel-BBox (S, W, N, E)
+# ============================
 BASEL_BBOX = (47.52, 7.54, 47.58, 7.62)
 
 OVERPASS_URLS = [
@@ -96,7 +90,7 @@ _OPENING_PART_RE = re.compile(
 )
 
 # ============================
-# STYLE: Karte "fast Vollbild"
+# STYLE
 # ============================
 st.markdown(
     """
@@ -355,9 +349,13 @@ def opening_hours_editor(key_prefix: str, initial_oh: Optional[str]) -> str:
         col_a, col_b, col_c, col_d = st.columns([1.2, 1.2, 1.2, 1.2])
         with col_a:
             is_open = st.checkbox(d, value=week[d]["open"], key=f"{key_prefix}_{d}_open")
+
         ranges = []
         if is_open:
-            default1 = week[d]["ranges"][0] if len(week[d]["ranges"]) >= 1 else (datetime(2000,1,1,8,0).time(), datetime(2000,1,1,18,0).time())
+            default1 = week[d]["ranges"][0] if len(week[d]["ranges"]) >= 1 else (
+                datetime(2000, 1, 1, 8, 0).time(),
+                datetime(2000, 1, 1, 18, 0).time()
+            )
             default2 = week[d]["ranges"][1] if len(week[d]["ranges"]) >= 2 else (None, None)
 
             with col_b:
@@ -372,9 +370,17 @@ def opening_hours_editor(key_prefix: str, initial_oh: Optional[str]) -> str:
             if add_second:
                 c2b, c2c = st.columns([1, 1])
                 with c2b:
-                    s2 = st.time_input(f"{d} Start 2", value=(default2[0] or datetime(2000,1,1,0,0).time()), key=f"{key_prefix}_{d}_s2")
+                    s2 = st.time_input(
+                        f"{d} Start 2",
+                        value=(default2[0] or datetime(2000, 1, 1, 0, 0).time()),
+                        key=f"{key_prefix}_{d}_s2"
+                    )
                 with c2c:
-                    e2 = st.time_input(f"{d} Ende 2", value=(default2[1] or datetime(2000,1,1,0,0).time()), key=f"{key_prefix}_{d}_e2")
+                    e2 = st.time_input(
+                        f"{d} Ende 2",
+                        value=(default2[1] or datetime(2000, 1, 1, 0, 0).time()),
+                        key=f"{key_prefix}_{d}_e2"
+                    )
                 ranges.append((s2, e2))
 
         week_out[d]["open"] = bool(is_open)
@@ -580,7 +586,7 @@ def load_cafes_with_stats() -> pd.DataFrame:
     """
     return pd.read_sql(sql, engine)
 
-def load_cafes_missing_postcode(limit: int = 5000) -> List[Dict[str, Any]]:
+def load_cafes_missing_postcode(limit: int = 200) -> List[Dict[str, Any]]:
     sql = """
     SELECT id, lat, lon
     FROM cafes
@@ -734,12 +740,13 @@ def nominatim_reverse(lat: float, lon: float, session: requests.Session) -> Tupl
 
     return display, postcode
 
-def enrich_missing_postcodes_with_progress():
-    missing = load_cafes_missing_postcode(limit=5000)
+def enrich_missing_postcodes_with_progress(limit: int = 200):
+    missing = load_cafes_missing_postcode(limit=limit)
     if not missing:
+        st.info("Keine fehlenden PLZ/Adresse gefunden.")
         return
 
-    st.info(f"Ergänze PLZ/Adresse für {len(missing)} Cafés (Nominatim, 1 Anfrage/Sek.).")
+    st.info(f"Ergänze PLZ/Adresse für {len(missing)} Cafés (Nominatim, max {limit}, 1 Anfrage/Sek.).")
 
     progress = st.progress(0)
     status = st.empty()
@@ -764,43 +771,63 @@ def enrich_missing_postcodes_with_progress():
 
     status.success("PLZ/Quartier-Anreicherung abgeschlossen.")
 
-    def bootstrap_db_once():
-        if st.session_state.get("bootstrapped", False):
-            return
+# ============================
+# STARTUP: DB quick test + init tables (fast)
+# ============================
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+except Exception as e:
+    st.error("❌ DB Verbindung fehlgeschlagen:")
+    st.exception(e)
+    st.stop()
+
+# Tabellen anlegen (schnell, blockiert nicht)
+init_db()
 
 # ============================
-# APP
+# SIDEBAR ADMIN/DEBUG
 # ============================
+with st.sidebar:
+    st.markdown("### ⚙️ Admin")
+    debug_mode = st.checkbox("Debug Mode (Stops early)", value=False)
+    st.caption("Bootstrap/Import läuft hier bewusst nur per Button (damit Cloud nie hängt).")
+
+    if debug_mode:
+        st.write("DB_URL vorhanden ✅ (nicht anzeigen)")
+        st.write("Engine OK ✅")
+        st.write("Tabelle cafes count:", cafes_count())
+        st.stop()
+
+    st.divider()
+    st.markdown("### 🧱 Bootstrap")
+    if st.button("1) OSM Import (nur wenn DB leer)"):
+        if cafes_count() == 0:
+            st.info("Initialer Basel-Import läuft (OpenStreetMap)…")
+            rows = fetch_osm_cafes_basel_bbox(BASEL_BBOX)
+            upsert_osm_cafes(rows)
+            st.success(f"Import abgeschlossen: {len(rows)} Cafés gefunden.")
+        else:
+            st.info("DB ist nicht leer – Import übersprungen.")
+        st.rerun()
+
+    batch = st.number_input("PLZ-Enrichment Batch", min_value=10, max_value=500, value=200, step=10)
+    if st.button("2) Fehlende PLZ/Adresse ergänzen (Batch)"):
+        enrich_missing_postcodes_with_progress(limit=int(batch))
+        st.rerun()
+
 # ============================
-# APP (DEBUG MODE)
+# LOAD DATA
 # ============================
-
-st.write("STEP 1: Secrets gelesen ✅")
-st.write("STEP 2: Engine bauen…")
-
-engine = get_engine(DB_URL)
-
-st.write("STEP 3: Engine gebaut ✅ – teste Verbindung…")
-with engine.connect() as conn:
-    conn.execute(text("SELECT 1"))
-
-st.write("STEP 4: DB OK ✅")
-
-st.write("STEP 6: load_cafes_with_stats()…")
 cafes = load_cafes_with_stats()
-st.write("STEP 7: cafés geladen ✅", len(cafes))
-
-st.stop()  # <- HIER STOPPEN, damit garantiert nichts anderes mehr läuft
-
 
 st.markdown("## Kaffis<3 - Rate your experience")
-
 
 # ----------------------------
 # Filter: Popover oben links
 # ----------------------------
 with st.popover("🔎 Filter", use_container_width=False):
-    quartiere = sorted([q for q in cafes["quartier"].dropna().unique()])
+    quartiere = sorted([q for q in cafes["quartier"].dropna().unique()]) if not cafes.empty else []
     selected_quartier = st.selectbox("Quartier", ["(alle)"] + quartiere)
 
     min_overall = st.slider("Mindest-Overall", 0.0, 5.0, 0.0, 0.5)
@@ -816,24 +843,25 @@ with st.popover("🔎 Filter", use_container_width=False):
 
 # Apply filters (Map)
 filtered = cafes.copy()
-filtered = filtered[(filtered["overall"].fillna(0.0)) >= float(min_overall)]
+if not filtered.empty:
+    filtered = filtered[(filtered["overall"].fillna(0.0)) >= float(min_overall)]
 
-if selected_quartier != "(alle)":
+if selected_quartier != "(alle)" and not filtered.empty:
     filtered = filtered[filtered["quartier"] == selected_quartier]
 
-if only_with_hours:
+if only_with_hours and not filtered.empty:
     filtered = filtered[filtered["opening_hours"].fillna("").str.strip() != ""]
 
-if hours_contains.strip():
+if hours_contains.strip() and not filtered.empty:
     filtered = filtered[filtered["opening_hours"].fillna("").str.contains(hours_contains.strip(), case=False, na=False)]
 
-if open_now:
+if open_now and not filtered.empty:
     now = datetime.now()
     day = DAYS[now.weekday()]
     hhmm = f"{now.hour:02d}:{now.minute:02d}"
     filtered = filtered[filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))]
 
-if custom_time_filter:
+if custom_time_filter and not filtered.empty:
     hhmm = f"{filter_time.hour:02d}:{filter_time.minute:02d}"
     filtered = filtered[filtered["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))]
 
@@ -851,24 +879,25 @@ with map_col:
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
 
-    for _, row in filtered.iterrows():
-        color = marker_color(row["overall"], int(row["rating_count"]))
-        icon = folium.Icon(color=color, icon="coffee", prefix="fa")
+    if not filtered.empty:
+        for _, row in filtered.iterrows():
+            color = marker_color(row.get("overall"), int(row.get("rating_count") or 0))
+            icon = folium.Icon(color=color, icon="coffee", prefix="fa")
 
-        rating_txt = "-" if pd.isna(row["overall"]) else f"{float(row['overall']):.1f} ⭐"
-        popup_html = f"""
-        <b>{row['name']}</b><br>
-        Adresse: {row['address'] or '-'}<br>
-        Bewertung: {rating_txt} ({int(row['rating_count'])})<br>
-        Öffnungszeiten: {row['opening_hours'] or '-'}
-        """
+            rating_txt = "-" if pd.isna(row["overall"]) else f"{float(row['overall']):.1f} ⭐"
+            popup_html = f"""
+            <b>{row['name']}</b><br>
+            Adresse: {row['address'] or '-'}<br>
+            Bewertung: {rating_txt} ({int(row['rating_count'])})<br>
+            Öffnungszeiten: {row['opening_hours'] or '-'}
+            """
 
-        folium.Marker(
-            location=[row["lat"], row["lon"]],
-            popup=folium.Popup(popup_html, max_width=420),
-            tooltip=row["name"],
-            icon=icon
-        ).add_to(m)
+            folium.Marker(
+                location=[row["lat"], row["lon"]],
+                popup=folium.Popup(popup_html, max_width=420),
+                tooltip=row["name"],
+                icon=icon
+            ).add_to(m)
 
     st.caption("Klick auf Marker (oder in die Nähe) → Café auswählen. Klick auf Karte → Koordinaten übernehmen.")
     map_state = st_folium(m, width=None, height=720)
@@ -877,7 +906,7 @@ with map_col:
     if map_state:
         clicked_obj = map_state.get("last_object_clicked") or map_state.get("last_clicked")
 
-    if clicked_obj:
+    if clicked_obj and not filtered.empty:
         lat_click = float(clicked_obj["lat"])
         lon_click = float(clicked_obj.get("lng", clicked_obj.get("lon")))
         selected_id = find_nearest_cafe_id(filtered, lat_click, lon_click)
@@ -906,12 +935,12 @@ with ui_col:
         st.caption("Neu erstellen oder bestehendes Café bearbeiten. Adresse über Nominatim suchen (Basel).")
 
         cafes_for_select = cafes.copy()
-        cafes_for_select["label"] = cafes_for_select.apply(
-            lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
-            axis=1
-        )
+        if not cafes_for_select.empty:
+            cafes_for_select["label"] = cafes_for_select.apply(
+                lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
+                axis=1
+            )
 
-        # Modus mit key (wichtig!)
         manage_mode = st.selectbox("Modus", ["Neu erstellen", "Bearbeiten"], key="manage_mode")
 
         edit_id = None
@@ -923,7 +952,6 @@ with ui_col:
             all_labels = list(id_to_label.values())
 
             default_label = id_to_label.get(int(sel_id)) if sel_id else (all_labels[0] if all_labels else "")
-            # selectbox default sauber setzen (wenn Karte was anderes gewählt hat)
             if "manage_cafe_label" not in st.session_state or st.session_state["manage_cafe_label"] != default_label:
                 st.session_state["manage_cafe_label"] = default_label
 
@@ -931,7 +959,6 @@ with ui_col:
             edit_id = [k for k, v in id_to_label.items() if v == chosen][0]
             st.session_state["selected_cafe_id"] = int(edit_id)
 
-        # Prefix pro Café (damit Widgets beim Wechsel neu initialisieren)
         form_prefix = f"manage_edit_{edit_id}" if (manage_mode == "Bearbeiten" and edit_id is not None) else "manage_new"
 
         # Initialwerte abhängig von Modus
@@ -953,9 +980,6 @@ with ui_col:
             init_quartier = None
             init_oh = ""
 
-        # ----------------------------
-        # Adresse suchen
-        # ----------------------------
         st.markdown("#### Adresse suchen (Nominatim)")
         addr_q = st.text_input("Suche", value="", placeholder="z.B. Steinentorstrasse 13", key=f"{form_prefix}_addr_search")
 
@@ -979,9 +1003,6 @@ with ui_col:
                 st.session_state[f"{form_prefix}_quartier_override"] = quartier_from_plz(chosen_addr.get("postcode"))
                 st.rerun()
 
-        # ----------------------------
-        # Formularfelder (mit keys!)
-        # ----------------------------
         name = st.text_input("Name", value=init_name, key=f"{form_prefix}_name")
         address = st.text_input("Adresse", value=init_address, key=f"{form_prefix}_address")
         lat = st.number_input("Latitude", value=float(init_lat), format="%.6f", key=f"{form_prefix}_lat")
@@ -1001,9 +1022,6 @@ with ui_col:
         st.write(f"**PLZ:** {postcode or '-'}")
         st.write(f"**Quartier:** {quartier or '-'}")
 
-        # ----------------------------
-        # Öffnungszeiten (WICHTIG: prefix abhängig von Café-ID!)
-        # ----------------------------
         st.markdown("#### Öffnungszeiten")
         oh_prefix = f"{form_prefix}_oh"
         opening_hours = opening_hours_editor(
@@ -1011,9 +1029,6 @@ with ui_col:
             initial_oh=init_oh if manage_mode == "Bearbeiten" else ""
         )
 
-        # ----------------------------
-        # Save
-        # ----------------------------
         if manage_mode == "Bearbeiten" and edit_id is not None:
             if st.button("Änderungen speichern", key=f"{form_prefix}_save_edit"):
                 if not name.strip():
@@ -1059,19 +1074,20 @@ with ui_col:
         st.caption("Café auswählen: auf Marker klicken ODER hier per Name suchen.")
 
         cafes_for_select = cafes.copy()
-        cafes_for_select["label"] = cafes_for_select.apply(
-            lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
-            axis=1
-        )
+        if not cafes_for_select.empty:
+            cafes_for_select["label"] = cafes_for_select.apply(
+                lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
+                axis=1
+            )
 
         search = st.text_input("Suche nach Name", value="", key="rate_search")
-        if search.strip():
+        if search.strip() and not cafes_for_select.empty:
             cafes_for_select = cafes_for_select[
                 cafes_for_select["name"].str.contains(search.strip(), case=False, na=False)
             ]
 
         if cafes_for_select.empty:
-            st.warning("Keine Cafés gefunden. Suchbegriff anpassen oder auf der Karte auswählen.")
+            st.warning("Keine Cafés gefunden. (Hast du schon importiert?)")
         else:
             selected_cafe_id = st.session_state.get("selected_cafe_id")
             options = cafes_for_select.sort_values("name")[["id", "label"]].to_records(index=False)
@@ -1129,33 +1145,23 @@ with ui_col:
                         "created_at": "Datum"
                     })
 
-                    # gewünschte Reihenfolge: Overall zuerst, Datum zuletzt
                     col_order = [
-                        "Name",
-                        "Overall",
-                        "Kaffee & Getränke",
-                        "Ambiente",
-                        "Service",
-                        "Preis/Leistung",
-                        "Speisen",
-                        "Kommentar",
-                        "Datum",
+                        "Name", "Overall",
+                        "Kaffee & Getränke", "Ambiente", "Service",
+                        "Preis/Leistung", "Speisen",
+                        "Kommentar", "Datum",
                     ]
-
-                    # (robust, falls mal eine Spalte fehlt)
                     col_order = [c for c in col_order if c in df_show.columns]
                     rest = [c for c in df_show.columns if c not in col_order]
                     df_show = df_show[col_order + rest]
 
                     st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-
             st.divider()
             st.markdown("#### Neue Bewertung")
 
             with st.form("rate_form"):
                 reviewer_name = st.text_input("Dein Name", value="")
-
                 coffee_quality = st.slider("Qualität von Kaffee & Getränken", 1, 5, 5)
                 ambience = st.slider("Atmosphäre & Ambiente", 1, 5, 5)
                 service = st.slider("Service", 1, 5, 5)
@@ -1187,37 +1193,41 @@ with ui_col:
 # ----------------------------
 st.divider()
 st.subheader("📋 Ergebnisliste")
-cafes = load_cafes_with_stats()
 
-filtered_tbl = cafes.copy()
-filtered_tbl = filtered_tbl[(filtered_tbl["overall"].fillna(0.0)) >= float(min_overall)]
+cafes2 = load_cafes_with_stats()
+filtered_tbl = cafes2.copy()
+if not filtered_tbl.empty:
+    filtered_tbl = filtered_tbl[(filtered_tbl["overall"].fillna(0.0)) >= float(min_overall)]
 
-if selected_quartier != "(alle)":
+if selected_quartier != "(alle)" and not filtered_tbl.empty:
     filtered_tbl = filtered_tbl[filtered_tbl["quartier"] == selected_quartier]
 
-if only_with_hours:
+if only_with_hours and not filtered_tbl.empty:
     filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").str.strip() != ""]
 
-if hours_contains.strip():
+if hours_contains.strip() and not filtered_tbl.empty:
     filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").str.contains(hours_contains.strip(), case=False, na=False)]
 
-if open_now:
+if open_now and not filtered_tbl.empty:
     now = datetime.now()
     day = DAYS[now.weekday()]
     hhmm = f"{now.hour:02d}:{now.minute:02d}"
     filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, day, hhmm))]
 
-if custom_time_filter:
+if custom_time_filter and not filtered_tbl.empty:
     hhmm = f"{filter_time.hour:02d}:{filter_time.minute:02d}"
     filtered_tbl = filtered_tbl[filtered_tbl["opening_hours"].fillna("").apply(lambda oh: is_open_at(oh, filter_day, hhmm))]
 
-st.dataframe(
-    filtered_tbl.sort_values(["overall", "rating_count"], ascending=False)[
-        ["name", "overall", "address", "opening_hours", "rating_count", "quartier"]
-    ],
-    use_container_width=True,
-    hide_index=True
-)
+if filtered_tbl.empty:
+    st.info("Noch keine Daten. Starte den Import in der Sidebar (OSM Import).")
+else:
+    st.dataframe(
+        filtered_tbl.sort_values(["overall", "rating_count"], ascending=False)[
+            ["name", "overall", "address", "opening_hours", "rating_count", "quartier"]
+        ],
+        use_container_width=True,
+        hide_index=True
+    )
 
 st.caption("Marker-Farben: blau=keine Bewertung, grün=Overall ≥4, orange=2–<4, rot=<2.")
 st.caption("Datenquelle: OpenStreetMap (Overpass) + PLZ/Adresse via Nominatim. OSM-Attribution beachten.")

@@ -788,33 +788,6 @@ init_db()
 # ============================
 # SIDEBAR ADMIN/DEBUG
 # ============================
-with st.sidebar:
-    st.markdown("### ⚙️ Admin")
-    debug_mode = st.checkbox("Debug Mode (Stops early)", value=False)
-    st.caption("Bootstrap/Import läuft hier bewusst nur per Button (damit Cloud nie hängt).")
-
-    if debug_mode:
-        st.write("DB_URL vorhanden ✅ (nicht anzeigen)")
-        st.write("Engine OK ✅")
-        st.write("Tabelle cafes count:", cafes_count())
-        st.stop()
-
-    st.divider()
-    st.markdown("### 🧱 Bootstrap")
-    if st.button("1) OSM Import (nur wenn DB leer)"):
-        if cafes_count() == 0:
-            st.info("Initialer Basel-Import läuft (OpenStreetMap)…")
-            rows = fetch_osm_cafes_basel_bbox(BASEL_BBOX)
-            upsert_osm_cafes(rows)
-            st.success(f"Import abgeschlossen: {len(rows)} Cafés gefunden.")
-        else:
-            st.info("DB ist nicht leer – Import übersprungen.")
-        st.rerun()
-
-    batch = st.number_input("PLZ-Enrichment Batch", min_value=10, max_value=500, value=200, step=10)
-    if st.button("2) Fehlende PLZ/Adresse ergänzen (Batch)"):
-        enrich_missing_postcodes_with_progress(limit=int(batch))
-        st.rerun()
 
 # ============================
 # LOAD DATA

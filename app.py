@@ -774,8 +774,8 @@ def bootstrap_db_once():
 bootstrap_db_once()
 cafes = load_cafes_with_stats()
 
-st.markdown("## 👁️ Basel Café Karte")
-st.caption("Cafés (OSM) sind automatisch importiert. Bewertungen & Filter sind in Supabase (Postgres) gespeichert.")
+st.markdown("## Kaffis in Basel")
+
 
 # ----------------------------
 # Filter: Popover oben links

@@ -896,7 +896,127 @@ if "manage_mode" not in st.session_state:
 
 with ui_col:
     st.markdown("### 🧰 Aktionen")
-    tab_manage, tab_rate = st.tabs(["➕ / ✏️ Café", "⭐ Bewerten"])
+    tab_manage, tab_rate = st.tabs(["⭐ Bewerten", "➕ / ✏️ Café"])
+    # ----------------------------
+    # TAB: Rate
+    # ----------------------------
+    with tab_rate:
+        st.caption("Café auswählen: auf Marker klicken ODER hier per Name suchen.")
+
+        cafes_for_select = cafes.copy()
+        if not cafes_for_select.empty:
+            cafes_for_select["label"] = cafes_for_select.apply(
+                lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
+                axis=1
+            )
+
+        search = st.text_input("Suche nach Name", value="", key="rate_search")
+        if search.strip() and not cafes_for_select.empty:
+            cafes_for_select = cafes_for_select[
+                cafes_for_select["name"].str.contains(search.strip(), case=False, na=False)
+            ]
+
+        if cafes_for_select.empty:
+            st.warning("Keine Cafés gefunden. (Hast du schon importiert?)")
+        else:
+            selected_cafe_id = st.session_state.get("selected_cafe_id")
+            options = cafes_for_select.sort_values("name")[["id", "label"]].to_records(index=False)
+
+            id_to_label = {int(i): str(l) for i, l in options}
+            labels = list(id_to_label.values())
+
+            default_label = id_to_label.get(int(selected_cafe_id)) if selected_cafe_id else labels[0]
+            if "rate_cafe_label" not in st.session_state or st.session_state["rate_cafe_label"] != default_label:
+                st.session_state["rate_cafe_label"] = default_label
+
+            chosen_label = st.selectbox("Café auswählen", labels, key="rate_cafe_label")
+            chosen_id = [k for k, v in id_to_label.items() if v == chosen_label][0]
+            st.session_state["selected_cafe_id"] = int(chosen_id)
+
+        selected_cafe_id = st.session_state.get("selected_cafe_id")
+
+        if not selected_cafe_id:
+            st.info("Bitte ein Café auswählen (Karte oder Dropdown), um es zu bewerten.")
+        else:
+            selected_row = cafes[cafes["id"] == selected_cafe_id].iloc[0]
+            st.write(f"**Ausgewählt:** {selected_row['name']}")
+
+            avgs = load_rating_averages_for_cafe(int(selected_cafe_id))
+            n = int(avgs.get("n") or 0)
+
+            if n == 0:
+                st.info("Noch keine Bewertungen vorhanden.")
+            else:
+                st.markdown("#### Durchschnitt (alle Bewertungen)")
+                st.write(f"**Overall:** {float(avgs['avg_overall']):.1f} ⭐  (Anzahl: {n})")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"Kaffee & Getränke: **{float(avgs['avg_coffee_quality']):.1f} ⭐**")
+                    st.write(f"Ambiente: **{float(avgs['avg_ambience']):.1f} ⭐**")
+                    st.write(f"Service: **{float(avgs['avg_service']):.1f} ⭐**")
+                with c2:
+                    st.write(f"Preis/Leistung: **{float(avgs['avg_value_for_money']):.1f} ⭐**")
+                    st.write(f"Speisen: **{float(avgs['avg_food']):.1f} ⭐**")
+
+                ratings_df = load_ratings_for_cafe(int(selected_cafe_id))
+                if not ratings_df.empty:
+                    st.markdown("#### Bewertungen (neueste zuerst)")
+
+                    df_show = ratings_df.rename(columns={
+                        "reviewer_name": "Name",
+                        "coffee_quality": "Kaffee & Getränke",
+                        "ambience": "Ambiente",
+                        "service": "Service",
+                        "value_for_money": "Preis/Leistung",
+                        "food": "Speisen",
+                        "overall": "Overall",
+                        "comment": "Kommentar",
+                        "created_at": "Datum"
+                    })
+
+                    col_order = [
+                        "Name", "Overall",
+                        "Kaffee & Getränke", "Ambiente", "Service",
+                        "Preis/Leistung", "Speisen",
+                        "Kommentar", "Datum",
+                    ]
+                    col_order = [c for c in col_order if c in df_show.columns]
+                    rest = [c for c in df_show.columns if c not in col_order]
+                    df_show = df_show[col_order + rest]
+
+                    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.markdown("#### Neue Bewertung")
+
+            with st.form("rate_form"):
+                reviewer_name = st.text_input("Dein Name", value="")
+                coffee_quality = st.slider("Qualität von Kaffee & Getränken", 1, 5, 5)
+                ambience = st.slider("Atmosphäre & Ambiente", 1, 5, 5)
+                service = st.slider("Service", 1, 5, 5)
+                value_for_money = st.slider("Preis-Leistungs-Verhältnis", 1, 5, 5)
+                food = st.slider("Speisenangebot", 1, 5, 5)
+
+                overall = (coffee_quality + ambience + service + value_for_money + food) / 5.0
+                st.write(f"**Overall (diese Bewertung):** {overall:.1f} ⭐")
+
+                comment = st.text_area("Kommentar (optional)", value="")
+                submitted = st.form_submit_button("Bewertung speichern")
+
+                if submitted:
+                    insert_rating_multi(
+                        int(selected_cafe_id),
+                        (reviewer_name.strip() or "Anonym"),
+                        int(coffee_quality),
+                        int(ambience),
+                        int(service),
+                        int(value_for_money),
+                        int(food),
+                        comment.strip() or None,
+                    )
+                    st.success("Bewertung gespeichert.")
+                    st.rerun()
 
     # ----------------------------
     # TAB: Create / Edit Cafe
@@ -1042,126 +1162,6 @@ with ui_col:
                     st.success("Café gespeichert.")
                     st.rerun()
 
-    # ----------------------------
-    # TAB: Rate
-    # ----------------------------
-    with tab_rate:
-        st.caption("Café auswählen: auf Marker klicken ODER hier per Name suchen.")
-
-        cafes_for_select = cafes.copy()
-        if not cafes_for_select.empty:
-            cafes_for_select["label"] = cafes_for_select.apply(
-                lambda r: f"{r['name']} — {r['address'] or ''}".strip(" —"),
-                axis=1
-            )
-
-        search = st.text_input("Suche nach Name", value="", key="rate_search")
-        if search.strip() and not cafes_for_select.empty:
-            cafes_for_select = cafes_for_select[
-                cafes_for_select["name"].str.contains(search.strip(), case=False, na=False)
-            ]
-
-        if cafes_for_select.empty:
-            st.warning("Keine Cafés gefunden. (Hast du schon importiert?)")
-        else:
-            selected_cafe_id = st.session_state.get("selected_cafe_id")
-            options = cafes_for_select.sort_values("name")[["id", "label"]].to_records(index=False)
-
-            id_to_label = {int(i): str(l) for i, l in options}
-            labels = list(id_to_label.values())
-
-            default_label = id_to_label.get(int(selected_cafe_id)) if selected_cafe_id else labels[0]
-            if "rate_cafe_label" not in st.session_state or st.session_state["rate_cafe_label"] != default_label:
-                st.session_state["rate_cafe_label"] = default_label
-
-            chosen_label = st.selectbox("Café auswählen", labels, key="rate_cafe_label")
-            chosen_id = [k for k, v in id_to_label.items() if v == chosen_label][0]
-            st.session_state["selected_cafe_id"] = int(chosen_id)
-
-        selected_cafe_id = st.session_state.get("selected_cafe_id")
-
-        if not selected_cafe_id:
-            st.info("Bitte ein Café auswählen (Karte oder Dropdown), um es zu bewerten.")
-        else:
-            selected_row = cafes[cafes["id"] == selected_cafe_id].iloc[0]
-            st.write(f"**Ausgewählt:** {selected_row['name']}")
-
-            avgs = load_rating_averages_for_cafe(int(selected_cafe_id))
-            n = int(avgs.get("n") or 0)
-
-            if n == 0:
-                st.info("Noch keine Bewertungen vorhanden.")
-            else:
-                st.markdown("#### Durchschnitt (alle Bewertungen)")
-                st.write(f"**Overall:** {float(avgs['avg_overall']):.1f} ⭐  (Anzahl: {n})")
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.write(f"Kaffee & Getränke: **{float(avgs['avg_coffee_quality']):.1f} ⭐**")
-                    st.write(f"Ambiente: **{float(avgs['avg_ambience']):.1f} ⭐**")
-                    st.write(f"Service: **{float(avgs['avg_service']):.1f} ⭐**")
-                with c2:
-                    st.write(f"Preis/Leistung: **{float(avgs['avg_value_for_money']):.1f} ⭐**")
-                    st.write(f"Speisen: **{float(avgs['avg_food']):.1f} ⭐**")
-
-                ratings_df = load_ratings_for_cafe(int(selected_cafe_id))
-                if not ratings_df.empty:
-                    st.markdown("#### Bewertungen (neueste zuerst)")
-
-                    df_show = ratings_df.rename(columns={
-                        "reviewer_name": "Name",
-                        "coffee_quality": "Kaffee & Getränke",
-                        "ambience": "Ambiente",
-                        "service": "Service",
-                        "value_for_money": "Preis/Leistung",
-                        "food": "Speisen",
-                        "overall": "Overall",
-                        "comment": "Kommentar",
-                        "created_at": "Datum"
-                    })
-
-                    col_order = [
-                        "Name", "Overall",
-                        "Kaffee & Getränke", "Ambiente", "Service",
-                        "Preis/Leistung", "Speisen",
-                        "Kommentar", "Datum",
-                    ]
-                    col_order = [c for c in col_order if c in df_show.columns]
-                    rest = [c for c in df_show.columns if c not in col_order]
-                    df_show = df_show[col_order + rest]
-
-                    st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-            st.divider()
-            st.markdown("#### Neue Bewertung")
-
-            with st.form("rate_form"):
-                reviewer_name = st.text_input("Dein Name", value="")
-                coffee_quality = st.slider("Qualität von Kaffee & Getränken", 1, 5, 5)
-                ambience = st.slider("Atmosphäre & Ambiente", 1, 5, 5)
-                service = st.slider("Service", 1, 5, 5)
-                value_for_money = st.slider("Preis-Leistungs-Verhältnis", 1, 5, 5)
-                food = st.slider("Speisenangebot", 1, 5, 5)
-
-                overall = (coffee_quality + ambience + service + value_for_money + food) / 5.0
-                st.write(f"**Overall (diese Bewertung):** {overall:.1f} ⭐")
-
-                comment = st.text_area("Kommentar (optional)", value="")
-                submitted = st.form_submit_button("Bewertung speichern")
-
-                if submitted:
-                    insert_rating_multi(
-                        int(selected_cafe_id),
-                        (reviewer_name.strip() or "Anonym"),
-                        int(coffee_quality),
-                        int(ambience),
-                        int(service),
-                        int(value_for_money),
-                        int(food),
-                        comment.strip() or None,
-                    )
-                    st.success("Bewertung gespeichert.")
-                    st.rerun()
 
 # ----------------------------
 # Tabelle (optional)

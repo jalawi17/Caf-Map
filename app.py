@@ -896,7 +896,7 @@ if "manage_mode" not in st.session_state:
 
 with ui_col:
     st.markdown("### 🧰 Aktionen")
-    tab_manage, tab_rate = st.tabs(["⭐ Bewerten", "➕ / ✏️ Café"])
+    tab_rate, tab_manage = st.tabs(["⭐ Bewerten", "➕ / ✏️ Café"])
     # ----------------------------
     # TAB: Rate
     # ----------------------------

@@ -894,9 +894,6 @@ with map_col:
 if "manage_mode" not in st.session_state:
     st.session_state["manage_mode"] = "Neu erstellen"
 
-if st.session_state.get("selected_cafe_id") is not None:
-    st.session_state["manage_mode"] = "Bearbeiten"
-
 with ui_col:
     st.markdown("### 🧰 Aktionen")
     tab_manage, tab_rate = st.tabs(["➕ / ✏️ Café", "⭐ Bewerten"])
@@ -905,7 +902,12 @@ with ui_col:
     # TAB: Create / Edit Cafe
     # ----------------------------
     with tab_manage:
-        st.caption("Neu erstellen oder bestehendes Café bearbeiten. Adresse über Nominatim suchen (Basel).")
+        st.caption("Neu erstellen oder bestehendes Café bearbeiten.")
+        if st.button("➕ Neues Café anlegen", use_container_width=True):
+            st.session_state["selected_cafe_id"] = None
+            st.session_state["manage_mode"] = "Neu erstellen"
+            st.rerun()
+
 
         cafes_for_select = cafes.copy()
         if not cafes_for_select.empty:
